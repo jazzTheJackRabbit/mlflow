@@ -5,9 +5,30 @@ from flask import Flask, send_from_directory
 
 from mlflow.server import handlers
 from mlflow.server.handlers import get_artifact_handler
-from mlflow.utils.process import exec_cmd
+from gunicorn.app.base import BaseApplication
+from gunicorn.six import iteritems
 
-# NB: These are intenrnal environment variables used for communication between
+
+class MlFlowTrackingGunicornApplication(BaseApplication):
+    def __init__(self, application, options=None):
+        self.options = options or {}
+        self.application = application
+        super(MlFlowTrackingGunicornApplication, self).__init__()
+
+    def load_config(self):
+        config = dict([(key, value) for key, value in iteritems(self.options)
+                       if key in self.cfg.settings and value is not None])
+        for key, value in iteritems(config):
+            self.cfg.set(key.lower(), value)
+
+    # def init(self, parser, opts, args):
+    #     return self.cfg
+
+    def load(self):
+        return self.application
+
+
+# NB: These are internal environment variables used for communication between
 # the cli and the forked gunicorn processes.
 BACKEND_STORE_URI_ENV_VAR = "_MLFLOW_SERVER_FILE_STORE"
 ARTIFACT_ROOT_ENV_VAR = "_MLFLOW_SERVER_ARTIFACT_ROOT"
@@ -63,7 +84,33 @@ def _run_server(file_store_path, default_artifact_root, host, port, workers, sta
         env_map[ARTIFACT_ROOT_ENV_VAR] = default_artifact_root
     if static_prefix:
         env_map[STATIC_PREFIX_ENV_VAR] = static_prefix
+
     bind_address = "%s:%s" % (host, port)
     opts = shlex.split(gunicorn_opts) if gunicorn_opts else []
-    exec_cmd(["gunicorn"] + opts + ["-b", bind_address, "-w", "%s" % workers, "mlflow.server:app"],
-             env=env_map, stream_output=True)
+
+    options = {
+        'bind': bind_address,
+        'workers': workers,
+    }
+
+    # options.update(env_map)
+    os.environ.update(env_map)
+    try:
+        application = MlFlowTrackingGunicornApplication(app, options=options)
+        application.run()
+    except Exception as e:
+        # TODO: Log this error or do something useful with it.
+        raise e
+
+
+if __name__ == "__main__":
+    # TODO: Get this from config
+    DEFAULT_LOCAL_FILE_AND_ARTIFACT_PATH = "./mlruns"
+
+    default_artifact_root = DEFAULT_LOCAL_FILE_AND_ARTIFACT_PATH
+
+    # TODO: Get this from config
+    backend_store_uri = "mysql://root:root@localhost:3306/mlflow_metrics?charset=utf8"
+
+    # TODO: Get this from config
+    _run_server(backend_store_uri, default_artifact_root, "127.0.0.1", 5001, 1, None, [])
